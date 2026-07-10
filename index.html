@@ -541,6 +541,31 @@ async function loadBridgeEvents(){
 /* 个股检索：直连东方财富真实公告(CORS*) + 腾讯实时行情(CORS*)，两形态通用；
    桌面版还能经后端 resolve_stock 把任意股票名解析为代码 */
 let SEARCH_STOCK = null;     // 当前个股搜索结果 {code,sym,name,quote,anns,concepts,relatedIdx}
+/* 网页版：腾讯 smartbox 返回裸的 v_hint="..." 赋值语句，用 <script> 注入跨域执行
+   （script 标签不受 CORS 限制），浏览器自动把 \uXXXX 转成真实中文 —— 可实时解析任意股票名 */
+function resolveViaSmartbox(q){
+  return new Promise((resolve)=>{
+    window.v_hint = null;
+    const s=document.createElement("script");
+    const timer=setTimeout(()=>{ try{s.remove();}catch(e){} resolve(null); }, 8000);
+    s.onload=()=>{
+      clearTimeout(timer);
+      const raw=window.v_hint; window.v_hint=null;
+      try{ s.remove(); }catch(e){}
+      if(!raw){ resolve(null); return; }
+      const cands=String(raw).split("^");
+      const pick=pred=>cands.map(c=>c.split("~")).find(pred);
+      const f = pick(x=>x.length>=3 && (x[0]==="sh"||x[0]==="sz") && /GP/.test(x[4]||""))   // 优先 A 股
+             || pick(x=>x.length>=3 && /GP/.test(x[4]||""))                                  // 其次任意股票
+             || (cands[0]?cands[0].split("~"):null);
+      if(f && f.length>=3) resolve({code:f[1], sym:f[0]+f[1], name:f[2]});
+      else resolve(null);
+    };
+    s.onerror=()=>{ clearTimeout(timer); try{s.remove();}catch(e){} resolve(null); };
+    s.src="https://smartbox.gtimg.cn/s3/?v=2&t=all&q="+encodeURIComponent(q);
+    document.body.appendChild(s);
+  });
+}
 async function resolveStock(q){
   q=(q||"").trim();
   if(/^\d{6}$/.test(q)){                                   // 6位代码
@@ -548,7 +573,9 @@ async function resolveStock(q){
     return {code:q, sym, name:REVMAP[sym]||""};
   }
   if(CODE_MAP[q]) return {code:CODE_MAP[q].slice(2), sym:CODE_MAP[q], name:q};
-  if(isBridge()){ try{ const r=await window.pywebview.api.resolve_stock(q); if(r&&r.code) return r; }catch(e){} }
+  const r=await resolveViaSmartbox(q);                     // 网页版：实时解析任意名称
+  if(r && r.code) return r;
+  if(isBridge()){ try{ const r2=await window.pywebview.api.resolve_stock(q); if(r2&&r2.code) return r2; }catch(e){} }
   return null;
 }
 async function fetchQuote(sym){
@@ -587,7 +614,7 @@ async function runSearch(){
   const st=await resolveStock(q);
   if(!st){                                  // 不是股票代码/名称 → 按关键词过滤资讯流
     SEARCH_STOCK=null;
-    showToast("未识别为股票代码/名称，已按关键词过滤资讯流");
+    showToast("未识别为股票（代码/名称）。若确认是真股票，请直接输入 6 位代码，或检查名称是否准确");
     render();
     return;
   }
@@ -699,7 +726,7 @@ function renderStockResult(st){
     return true;
   });
   let out="";
-  out+=`<div class="searchhead">🔍 股票检索：<b>${escapeHtml(st.name||st.code)}</b>（${st.code}） <span class="clr" onclick="clearSearch()">✕ 清除</span></div>`;
+  out+=`<div class="searchhead">🔍 股票检索：<b>${escapeHtml((st.quote&&st.quote.name)||st.name||st.code)}</b>（${st.code}） <span class="clr" onclick="clearSearch()">✕ 清除</span></div>`;
   const q=st.quote, up=(q&&q.pct>=0);
   out+=`<div class="stockcard">`;
   if(q){
