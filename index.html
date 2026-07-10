@@ -207,6 +207,20 @@
   .drop{width:10px;height:10px;border-radius:50% 50% 50% 0;background:var(--ink);transform:rotate(45deg);
      display:inline-block;animation:drop 1.1s ease-in-out infinite}
   @keyframes drop{0%{transform:rotate(45deg) translateY(0);opacity:.3}50%{opacity:1}100%{transform:rotate(45deg) translateY(10px);opacity:.3}}
+  .stockcard{background:linear-gradient(135deg,#fff,#fbfaf8);border-left:4px solid #1971C2;border-radius:12px;padding:14px 18px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+  .stockcard .sq{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .stockcard .sname{font-size:20px;font-weight:800;color:#222}
+  .stockcard .scode{font-size:12px;color:#999}
+  .stockcard .sprice{font-size:22px;font-weight:800;margin-left:auto}
+  .stockcard .spct{font-size:16px;font-weight:700}
+  .stockcard .snodata{font-size:14px;color:#E8590C;margin-left:auto}
+  .stockcard .sconc{margin-top:8px}
+  .annsec{background:#fbfdff;border:1px solid #e7f0fb;border-radius:12px;padding:12px 16px;margin-bottom:14px}
+  .annsec .annh{font-size:13px;font-weight:700;color:#1971C2;margin-bottom:8px}
+  .annitem{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-top:1px dashed #eef3f8;font-size:13px}
+  .annitem:first-of-type{border-top:none}
+  .annitem .annt{color:#333;flex:1}
+  .annitem .annd{color:#aaa;font-size:12px;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -434,6 +448,7 @@ const CODE_MAP = {
   "中微公司":"sh688012","北方华创":"sz002371","中信证券":"sh600030","国泰君安":"sh601211",
   "山东黄金":"sh600547","湖南黄金":"sz002155","新易盛":"sz300502","天孚通信":"sz300394"
 };
+const REVMAP={}; for(const n in CODE_MAP) REVMAP[CODE_MAP[n]]=n;  // symbol -> 名称
 // 数据模式：bridge=桌面后端真实全量；web=网页直连真实行情(快讯兜底模拟)
 function detectMode(){ try{ return (window.pywebview && window.pywebview.api) ? "bridge" : "web"; }catch(e){ return "web"; } }
 const DATA_MODE = detectMode();
@@ -523,27 +538,64 @@ async function loadBridgeEvents(){
     }
   }catch(e){ /* 桥不可用则保持 mock */ }
 }
-/* 桌面版：按关键词实时检索真实新闻（后端绕过浏览器跨域），命中即并入分析流 */
-let SEARCH_EXTRA = [];
+/* 个股检索：直连东方财富真实公告(CORS*) + 腾讯实时行情(CORS*)，两形态通用；
+   桌面版还能经后端 resolve_stock 把任意股票名解析为代码 */
+let SEARCH_STOCK = null;     // 当前个股搜索结果 {code,sym,name,quote,anns,concepts,relatedIdx}
+async function resolveStock(q){
+  q=(q||"").trim();
+  if(/^\d{6}$/.test(q)){                                   // 6位代码
+    const sym=(/^(60|68|9)/.test(q))?"sh"+q:"sz"+q;
+    return {code:q, sym, name:REVMAP[sym]||""};
+  }
+  if(CODE_MAP[q]) return {code:CODE_MAP[q].slice(2), sym:CODE_MAP[q], name:q};
+  if(isBridge()){ try{ const r=await window.pywebview.api.resolve_stock(q); if(r&&r.code) return r; }catch(e){} }
+  return null;
+}
+async function fetchQuote(sym){
+  const r=await fetch("https://qt.gtimg.cn/q="+sym,{mode:"cors"});
+  const buf=await r.arrayBuffer();
+  const txt=new TextDecoder("gbk").decode(buf);
+  const m=txt.match(/v_\w+="([^"]*)"/);
+  if(!m) return null;
+  const f=m[1].split("~");
+  const price=parseFloat(f[3]), prev=parseFloat(f[4]);
+  if(isNaN(price)||isNaN(prev)) return null;
+  return {name:f[1], code:f[2], price, prev, pct:+(((price-prev)/prev*100).toFixed(2))};
+}
+async function fetchAnns(code){
+  const r=await fetch("https://np-anotice-stock.eastmoney.com/api/security/ann?sr="+code+"&page_size=12&page_index=1",{mode:"cors"});
+  const j=await r.json();
+  const lst=(j.data&&j.data.list)||[];
+  return lst.map(it=>({title:it.title||it.title_ch||"(未命名公告)", date:(it.notice_date||"").slice(0,10)}));
+}
+function relatedToStock(st){
+  const conc=new Set(st.concepts||[]);
+  const idx=[];
+  EVENTS.forEach((e,i)=>{
+    const text=(e.title+" "+e.body).toLowerCase();
+    if(st.name && text.includes(st.name.toLowerCase())) return idx.push(i);
+    if(text.includes(st.code)) return idx.push(i);
+    if(e.affected.some(a=>a.code===st.code)) return idx.push(i);
+    if(e.affected.some(a=>(STOCK_CONCEPT[a.code]||[]).some(c=>conc.has(c)))) return idx.push(i);
+    if([...conc].some(c=>text.includes(c.toLowerCase()))) return idx.push(i);
+  });
+  return idx;
+}
 async function runSearch(){
   const q=(document.getElementById("search").value||"").trim();
-  if(isBridge() && q){
-    try{
-      const extra = await window.pywebview.api.search_news(q);
-      if(Array.isArray(extra) && extra.length && !extra[0].error){
-        const seen = new Set(EVENTS.map(e=>(e.title||"").slice(0,40)));
-        extra.forEach(e=>{
-          const t=(e.title||"").slice(0,40);
-          if(seen.has(t)) return;
-          seen.add(t);
-          const item=Object.assign({market:"综合",cat:"财经快讯",real:true,fromSearch:true}, e);
-          const s=classify(item.title+" "+(item.body||"")); item.senti=s.tier; item.conf=s.conf; item.affected=mapAffected(item.title,item.body);
-          EVENTS.push(item);
-        });
-        SEARCH_EXTRA = extra;
-      }
-    }catch(e){}
+  if(!q){ SEARCH_STOCK=null; render(); return; }
+  const st=await resolveStock(q);
+  if(!st){                                  // 不是股票代码/名称 → 按关键词过滤资讯流
+    SEARCH_STOCK=null;
+    showToast("未识别为股票代码/名称，已按关键词过滤资讯流");
+    render();
+    return;
   }
+  let quote=null, anns=[];
+  try{ const [q1,a1]=await Promise.all([fetchQuote(st.sym), fetchAnns(st.code)]); quote=q1; anns=a1; }catch(e){}
+  const concepts=STOCK_CONCEPT[st.code]||[];
+  const relatedIdx=relatedToStock({...st, concepts});
+  SEARCH_STOCK={...st, quote, anns, concepts, relatedIdx};
   render();
 }
 
@@ -609,6 +661,7 @@ function searchEvents(q){
 }
 function clearSearch(){
   document.getElementById("search").value="";
+  SEARCH_STOCK=null;
   fHoldOnly=false;
   syncPoolActive();
   render();
@@ -638,7 +691,39 @@ function cardHtml(e,isP){
       <div class="meta"><span>来源：${e.src} · ${e.time}${e.real?' · <b style="color:#2B8A3E">真实</b>':(isBridge()?'':' · <b style="color:#E8590C">模拟</b>')}${e.fromSearch?' · <b style="color:#1971C2">检索</b>':''}</span><span>${isP?'⚡ 即时推送（已打破聚合延迟）':'聚合延迟 30s'}</span></div>
     </div>`;
 }
+function renderStockResult(st){
+  let rel=st.relatedIdx.map(i=>EVENTS[i]).filter(e=>{
+    if(fMarket!=="全部"&&e.market!==fMarket)return false;
+    if(fCat!=="全部"&&e.cat!==fCat)return false;
+    if(fSenti!=="全部"&&e.senti!==fSenti)return false;
+    return true;
+  });
+  let out="";
+  out+=`<div class="searchhead">🔍 股票检索：<b>${escapeHtml(st.name||st.code)}</b>（${st.code}） <span class="clr" onclick="clearSearch()">✕ 清除</span></div>`;
+  const q=st.quote, up=(q&&q.pct>=0);
+  out+=`<div class="stockcard">`;
+  if(q){
+    out+=`<div class="sq"><span class="sname">${escapeHtml(q.name)}</span><span class="scode">${q.code}</span>`
+      +`<span class="sprice" style="color:${up?'#C92A2A':'#2B8A3E'}">${q.price.toFixed(2)}</span>`
+      +`<span class="spct" style="color:${up?'#C92A2A':'#2B8A3E'}">${(up?'+':'')+q.pct}%</span></div>`;
+  }else{
+    out+=`<div class="sq"><span class="sname">${escapeHtml(st.name||st.code)}</span><span class="scode">${st.code}</span><span class="snodata">行情获取失败</span></div>`;
+  }
+  if(st.concepts.length) out+=`<div class="sconc">概念板块：${st.concepts.map(c=>`<span class="tag conc">${c}</span>`).join("")}</div>`;
+  out+=`</div>`;
+  out+=`<div class="annsec"><div class="annh">📋 真实公告披露 · 东方财富（代码 ${st.code}）</div>`;
+  out+= st.anns.length
+    ? st.anns.map(a=>`<div class="annitem"><span class="annt">${escapeHtml(a.title)}</span><span class="annd">${a.date}</span></div>`).join("")
+    : `<div class="empty" style="padding:10px">暂无最新公告披露</div>`;
+  out+=`</div>`;
+  out+=`<div class="priosec sub">🔗 相关资讯（${rel.length}）</div>`;
+  if(!rel.length) out+=`<div class="empty">墨尽无声 — 资讯流中暂无该股票相关消息<br><span style="font-size:12px">已为你拉取上方真实公告；也可将其加入「优先推送池」接收即时消息</span></div>`;
+  else out+=rel.map(e=>cardHtml(e,false)).join("");
+  document.getElementById("stream").innerHTML=out;
+  if(typeof syncPoolActive==="function") syncPoolActive();
+}
 function render(){
+  if(SEARCH_STOCK){ renderStockResult(SEARCH_STOCK); return; }
   const q=(document.getElementById("search").value||"").trim();
   const idx=searchEvents(q);
   const HOLD_SET=new Set(HOLDINGS.map(h=>h.name+h.code));
