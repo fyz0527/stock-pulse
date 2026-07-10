@@ -182,7 +182,12 @@
   .priosec{font-size:13px;font-weight:700;color:#C92A2A;margin:8px 2px 12px;display:flex;align-items:center;gap:6px}
   .priosec.sub{color:#8a847a;font-weight:600;margin-top:16px}
   /* 顶部优先推送铃 */
-  .htop{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .htop{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .data-status{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#8a847a;background:#f5f2ee;border:1px solid var(--line);padding:5px 11px;border-radius:18px}
+  .data-status .dot{width:7px;height:7px;border-radius:50%;background:#bbb}
+  .data-status .dot.live{background:#2B8A3E;box-shadow:0 0 0 3px rgba(43,138,62,.15)}
+  .data-status .dot.sim{background:#E8590C}
+  .hot .qp{font-size:10.5px;margin-left:5px;font-weight:700}
   .prio-bell{font-family:inherit;cursor:pointer;border:1px solid rgba(255,255,255,.4);background:rgba(255,255,255,.1);color:#fff;padding:7px 14px;border-radius:20px;font-size:12.5px;font-weight:700;backdrop-filter:blur(4px);transition:.2s;white-space:nowrap}
   .prio-bell:hover{background:rgba(255,255,255,.22)}
   .prio-bell.on{background:#fff;color:#C92A2A;border-color:#fff}
@@ -216,6 +221,7 @@
       </div>
     </div>
     <button class="prio-bell" id="prioBell" onclick="togglePrioOnly()">🔥 优先推送 <span id="prioCount">0</span></button>
+    <span class="data-status" id="dataStatus"><span class="dot sim"></span> 演示数据（行情/快讯均为模拟）</span>
   </div>
   <span class="tag-line">演示原型 · 数据与 AI 判定为模拟（接入点已预留真实 LLM / 行情 API）</span>
   <div class="brush"></div>
@@ -284,9 +290,9 @@
 </section>
 
 <div class="disc">
-  ⚠️ 风险提示：本页面为产品原型演示。资讯、情绪判定、受影响标的映射及投顾建议均由<b>模拟数据 + 启发式规则</b>生成，
-  仅用于交互与逻辑演示，<b>不构成任何投资建议</b>。生产环境将在 classify_sentiment / llm_infer_affected 处接入真实大模型，
-  在行情/映射处以实时数据替代。投资有风险，入市需谨慎。
+  ⚠️ 风险提示：本页面为产品原型演示。<b>行情为实时数据</b>（网页版直连腾讯、桌面版走本地后端），<b>快讯在桌面版为真实抓取、网页版为模拟</b>；
+  情绪判定、受影响标的映射及投顾建议由<b>启发式规则</b>生成，仅用于交互与逻辑演示，<b>不构成任何投资建议</b>。
+  生产环境将在 classify_sentiment / llm_infer_affected 处接入真实大模型。投资有风险，入市需谨慎。
 </div>
 
 <script>
@@ -420,6 +426,96 @@ const EVENTS = [
 /* 预计算情绪 + 映射 */
 EVENTS.forEach(e=>{ const s=classify(e.title+" "+e.body); e.senti=s.tier; e.conf=s.conf; e.affected=mapAffected(e.title,e.body); });
 
+/* ============ 5.5 真实数据源层（网页版直连行情 / 桌面版 pywebview 桥） ============ */
+// 名称→腾讯行情 symbol（仅 A股可直连；美股/韩股为事件源，不拉行情）
+const CODE_MAP = {
+  "中际旭创":"sz300308","东山精密":"sz002384","寒武纪":"sh688256","兆易创新":"sh603986",
+  "北京君正":"sz300223","澜起科技":"sh688008","京东方A":"sz000725","蓝思科技":"sz300433",
+  "中微公司":"sh688012","北方华创":"sz002371","中信证券":"sh600030","国泰君安":"sh601211",
+  "山东黄金":"sh600547","湖南黄金":"sz002155","新易盛":"sz300502","天孚通信":"sz300394"
+};
+// 数据模式：bridge=桌面后端真实全量；web=网页直连真实行情(快讯兜底模拟)
+function detectMode(){ try{ return (window.pywebview && window.pywebview.api) ? "bridge" : "web"; }catch(e){ return "web"; } }
+const DATA_MODE = detectMode();
+const QUOTE_CACHE = {};   // symbol -> {symbol,name,code,price,prev,pct}
+
+function tencentSymbol(code){
+  if(!code) return null;
+  if(/^(60|68|9)/.test(code)) return "sh"+code;
+  if(/^(00|30|20)/.test(code)) return "sz"+code;
+  return null;
+}
+async function fetchQuotes(symbols){
+  try{
+    const r = await fetch("https://qt.gtimg.cn/q="+symbols.join(","), {mode:"cors"});
+    const buf = await r.arrayBuffer();
+    const txt = new TextDecoder("gbk").decode(buf);
+    txt.split(";").forEach(line=>{
+      const m = line.match(/v_(\w+)="([^"]*)"/); if(!m || !m[2]) return;
+      const f = m[2].split("~");
+      const price = parseFloat(f[3]), prev = parseFloat(f[4]);
+      if(isNaN(price) || isNaN(prev)) return;
+      QUOTE_CACHE[m[1]] = {symbol:m[1], name:f[1], code:f[2], price, prev, pct:+(((price-prev)/prev*100).toFixed(2))};
+    });
+    return true;
+  }catch(e){ return false; }
+}
+async function refreshQuotes(){
+  const syms = new Set();
+  HOLDINGS.forEach(h=>{ const s=tencentSymbol(h.code); if(s) syms.add(s); });
+  Object.values(CODE_MAP).forEach(s=>syms.add(s));
+  if(syms.size){ await fetchQuotes([...syms]); }
+  applyQuotesToUI();
+  updateDataStatus();
+}
+function quoteOf(code){ const s=tencentSymbol(code); return s ? QUOTE_CACHE[s] : null; }
+function applyQuotesToUI(){
+  // 优先池 chip 价格
+  [...poolBox.children].forEach(ch=>{
+    const nm = ch.dataset.stock;
+    const cd = (HOLDINGS.find(h=>h.name===nm)||{}).code || CODE_MAP[nm];
+    const q = cd ? quoteOf(cd) : null;
+    let pe = ch.querySelector(".qp");
+    if(q){
+      if(!pe){ pe=document.createElement("span"); pe.className="qp"; ch.appendChild(pe); }
+      pe.textContent = " "+(q.pct>=0?"▲":"▼")+q.price.toFixed(2)+" "+(q.pct>=0?"+":"")+q.pct+"%";
+      pe.style.color = q.pct>=0 ? "#C92A2A" : "#2B8A3E";  // 涨红跌绿（A股习惯）
+    }
+  });
+  // 私人投顾卡价格
+  if(document.getElementById("view-advisor").style.display!=="none"){
+    HOLDINGS.forEach(h=>{
+      const card = [...document.querySelectorAll("#advisor .adv")].find(d=>d.dataset.stock===h.name);
+      if(!card) return;
+      const q = quoteOf(h.code); let pe = card.querySelector(".qprice");
+      if(q){
+        if(!pe){ pe=document.createElement("span"); pe.className="qprice"; pe.style.marginLeft="8px"; pe.style.fontSize="12px"; pe.style.fontWeight="700"; card.querySelector(".top").appendChild(pe); }
+        pe.textContent = (q.pct>=0?"▲":"▼")+"¥"+q.price.toFixed(2); pe.style.color = q.pct>=0?"#C92A2A":"#2B8A3E";
+      }
+    });
+  }
+}
+function updateDataStatus(){
+  const el = document.getElementById("dataStatus"); if(!el) return;
+  if(DATA_MODE==="bridge") el.innerHTML = '<span class="dot live"></span> 实时行情 · 真实快讯（桌面后端）';
+  else if(Object.keys(QUOTE_CACHE).length) el.innerHTML = '<span class="dot live"></span> 实时行情已连接（腾讯）· 快讯为模拟';
+  else el.innerHTML = '<span class="dot sim"></span> 演示数据（行情/快讯均为模拟）';
+}
+/* 桌面版：从 python 后端拉真实快讯，替换 EVENTS 并复用前端分析 */
+function whenBridgeReady(cb){ if(window.pywebview && window.pywebview.api) return cb(); window.addEventListener("pywebviewready", cb); }
+async function loadBridgeEvents(){
+  try{
+    const evs = await window.pywebview.api.get_events();
+    if(Array.isArray(evs) && evs.length && !evs[0].error){
+      EVENTS.length = 0;
+      evs.forEach(e=>EVENTS.push(Object.assign({market:"综合",cat:"财经快讯",real:true}, e)));
+      EVENTS.forEach(e=>{ const s=classify(e.title+" "+(e.body||"")); e.senti=s.tier; e.conf=s.conf; e.affected=mapAffected(e.title,e.body); });
+      render(); renderPool(); updateDataStatus();
+      showToast("✅ 已接入真实快讯（"+EVENTS.length+" 条）");
+    }
+  }catch(e){ /* 桥不可用则保持 mock */ }
+}
+
 /* ============ 6. 过滤状态 ============ */
 let fMarket="全部", fCat="全部", fSenti="全部", fHoldOnly=false, fPrioOnly=false;
 const MARKETS=["全部","美股","韩股","日股","A股","宏观"];
@@ -508,7 +604,7 @@ function cardHtml(e,isP){
       <div class="stitle">${e.title}</div>
       <div class="sbody">${e.body}</div>
       <div class="affect"><div class="h">📌 受影响 A 股（${e.affected.length}）</div>${stocks}</div>
-      <div class="meta"><span>来源：${e.src} · ${e.time}</span><span>${isP?'⚡ 即时推送（已打破聚合延迟）':'聚合延迟 30s'}</span></div>
+      <div class="meta"><span>来源：${e.src} · ${e.time}${e.real?' · <b style="color:#2B8A3E">真实</b>':(DATA_MODE==='web'?' · <b style="color:#E8590C">模拟</b>':'')}</span><span>${isP?'⚡ 即时推送（已打破聚合延迟）':'聚合延迟 30s'}</span></div>
     </div>`;
 }
 function render(){
@@ -760,6 +856,10 @@ function simulatePush(){
 /* ============ init ============ */
 renderPool(); render();   // 投顾页进入时才 render（避免隐藏态画空白 canvas）
 setInterval(simulatePush, 9000);
+/* 真实数据接入：行情两端均直连腾讯（CORS 开放）；真实快讯仅桌面 pywebview 桥提供 */
+refreshQuotes();
+setInterval(refreshQuotes, 20000);
+if(DATA_MODE==="bridge"){ whenBridgeReady(loadBridgeEvents); }
 </script>
 </body>
 </html>
