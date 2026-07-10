@@ -75,6 +75,48 @@ class StockPulseAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    def search_news(self, q):
+        """按关键词实时检索真实财经新闻（新浪滚动接口，后端抓取绕过跨域）。
+        返回与关键词相关的新闻条目；前端并入分析流。"""
+        try:
+            import urllib.parse
+            url = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&num=60&page=1"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            items = (data.get("result") or {}).get("data") or []
+            ql = (q or "").strip().lower()
+            out = []
+            for it in items:
+                title = (it.get("title") or "").strip()
+                if not title:
+                    continue
+                intro = (it.get("intro") or "").strip()
+                kw = (it.get("keywords") or "")
+                hay = (title + " " + intro + " " + kw).lower()
+                if ql and ql not in hay:
+                    continue
+                ctime = it.get("ctime") or it.get("intime") or ""
+                try:
+                    t = datetime.fromtimestamp(int(ctime)).strftime("%H:%M")
+                except Exception:
+                    t = ""
+                out.append({
+                    "title": title,
+                    "body": intro,
+                    "src": it.get("media") or "新浪财经",
+                    "time": t,
+                    "market": "综合",
+                    "cat": "财经快讯",
+                    "real": True,
+                })
+                if len(out) >= 20:
+                    break
+            return out
+        except Exception as e:
+            return [{"error": str(e)}]
+
 
 def main():
     html = resource_path("index.html")
