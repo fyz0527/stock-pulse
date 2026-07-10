@@ -1,0 +1,26 @@
+# ===== Python 虚拟环境 =====
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== PyInstaller 构建产物 =====
+build/
+dist/
+
+# ===== 本地工具/元数据（不含源码）=====
+.workbuddy/
+.codebuddy/
+
+# ===== 被 build_pool.sh 取代的旧构建脚本 =====
+build.sh
+build2.sh
+build3.sh
+build4.sh
+build5.sh
+build6.sh
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+ehthumbs.db
