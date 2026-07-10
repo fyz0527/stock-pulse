@@ -241,8 +241,8 @@
     <div class="toolbar">
       <div class="search">
         <span class="ic">🔍</span>
-        <input id="search" placeholder="输入股票代码或名称，汇集相关消息（如：中际旭创 / 300308 / 英伟达）" oninput="render()" onkeydown="if(event.key==='Enter')render()" />
-        <button class="sbtn" onclick="render()">搜索</button>
+        <input id="search" placeholder="输入股票代码或名称，汇集相关消息（如：中际旭创 / 300308 / 英伟达）" oninput="render()" onkeydown="if(event.key==='Enter')runSearch()" />
+        <button class="sbtn" onclick="runSearch()">搜索</button>
       </div>
     </div>
     <div id="stream"></div>
@@ -437,6 +437,8 @@ const CODE_MAP = {
 // 数据模式：bridge=桌面后端真实全量；web=网页直连真实行情(快讯兜底模拟)
 function detectMode(){ try{ return (window.pywebview && window.pywebview.api) ? "bridge" : "web"; }catch(e){ return "web"; } }
 const DATA_MODE = detectMode();
+/* 运行时动态判断桥是否就绪（顶部 detectMode 在脚本加载瞬间可能早于 pywebviewready，故用函数实时判定） */
+function isBridge(){ try{ return !!(window.pywebview && window.pywebview.api); }catch(e){ return false; } }
 const QUOTE_CACHE = {};   // symbol -> {symbol,name,code,price,prev,pct}
 
 function tencentSymbol(code){
@@ -497,23 +499,52 @@ function applyQuotesToUI(){
 }
 function updateDataStatus(){
   const el = document.getElementById("dataStatus"); if(!el) return;
-  if(DATA_MODE==="bridge") el.innerHTML = '<span class="dot live"></span> 实时行情 · 真实快讯（桌面后端）';
+  if(isBridge()) el.innerHTML = '<span class="dot live"></span> 实时行情 · 真实快讯（桌面后端）';
   else if(Object.keys(QUOTE_CACHE).length) el.innerHTML = '<span class="dot live"></span> 实时行情已连接（腾讯）· 快讯为模拟';
   else el.innerHTML = '<span class="dot sim"></span> 演示数据（行情/快讯均为模拟）';
 }
-/* 桌面版：从 python 后端拉真实快讯，替换 EVENTS 并复用前端分析 */
+/* 桌面版：从 python 后端拉真实快讯，追加到既有 EVENTS（保留已分析的精选事件，不覆盖） */
 function whenBridgeReady(cb){ if(window.pywebview && window.pywebview.api) return cb(); window.addEventListener("pywebviewready", cb); }
 async function loadBridgeEvents(){
   try{
     const evs = await window.pywebview.api.get_events();
     if(Array.isArray(evs) && evs.length && !evs[0].error){
-      EVENTS.length = 0;
-      evs.forEach(e=>EVENTS.push(Object.assign({market:"综合",cat:"财经快讯",real:true}, e)));
+      const before = EVENTS.length;
+      const seen = new Set(EVENTS.map(e=>(e.title||"").slice(0,40)));
+      evs.forEach(e=>{
+        const t=(e.title||"").slice(0,40);
+        if(seen.has(t)) return;            // 去重，避免真实快讯与精选事件重复
+        seen.add(t);
+        EVENTS.push(Object.assign({market:"综合",cat:"财经快讯",real:true}, e));
+      });
       EVENTS.forEach(e=>{ const s=classify(e.title+" "+(e.body||"")); e.senti=s.tier; e.conf=s.conf; e.affected=mapAffected(e.title,e.body); });
       render(); renderPool(); updateDataStatus();
-      showToast("✅ 已接入真实快讯（"+EVENTS.length+" 条）");
+      showToast("✅ 已接入真实快讯（+"+(EVENTS.length-before)+" 条）");
     }
   }catch(e){ /* 桥不可用则保持 mock */ }
+}
+/* 桌面版：按关键词实时检索真实新闻（后端绕过浏览器跨域），命中即并入分析流 */
+let SEARCH_EXTRA = [];
+async function runSearch(){
+  const q=(document.getElementById("search").value||"").trim();
+  if(isBridge() && q){
+    try{
+      const extra = await window.pywebview.api.search_news(q);
+      if(Array.isArray(extra) && extra.length && !extra[0].error){
+        const seen = new Set(EVENTS.map(e=>(e.title||"").slice(0,40)));
+        extra.forEach(e=>{
+          const t=(e.title||"").slice(0,40);
+          if(seen.has(t)) return;
+          seen.add(t);
+          const item=Object.assign({market:"综合",cat:"财经快讯",real:true,fromSearch:true}, e);
+          const s=classify(item.title+" "+(item.body||"")); item.senti=s.tier; item.conf=s.conf; item.affected=mapAffected(item.title,item.body);
+          EVENTS.push(item);
+        });
+        SEARCH_EXTRA = extra;
+      }
+    }catch(e){}
+  }
+  render();
 }
 
 /* ============ 6. 过滤状态 ============ */
@@ -604,7 +635,7 @@ function cardHtml(e,isP){
       <div class="stitle">${e.title}</div>
       <div class="sbody">${e.body}</div>
       <div class="affect"><div class="h">📌 受影响 A 股（${e.affected.length}）</div>${stocks}</div>
-      <div class="meta"><span>来源：${e.src} · ${e.time}${e.real?' · <b style="color:#2B8A3E">真实</b>':(DATA_MODE==='web'?' · <b style="color:#E8590C">模拟</b>':'')}</span><span>${isP?'⚡ 即时推送（已打破聚合延迟）':'聚合延迟 30s'}</span></div>
+      <div class="meta"><span>来源：${e.src} · ${e.time}${e.real?' · <b style="color:#2B8A3E">真实</b>':(isBridge()?'':' · <b style="color:#E8590C">模拟</b>')}${e.fromSearch?' · <b style="color:#1971C2">检索</b>':''}</span><span>${isP?'⚡ 即时推送（已打破聚合延迟）':'聚合延迟 30s'}</span></div>
     </div>`;
 }
 function render(){
@@ -859,7 +890,7 @@ setInterval(simulatePush, 9000);
 /* 真实数据接入：行情两端均直连腾讯（CORS 开放）；真实快讯仅桌面 pywebview 桥提供 */
 refreshQuotes();
 setInterval(refreshQuotes, 20000);
-if(DATA_MODE==="bridge"){ whenBridgeReady(loadBridgeEvents); }
+if(DATA_MODE==="bridge" || typeof window!=="undefined"){ whenBridgeReady(loadBridgeEvents); }
 </script>
 </body>
 </html>
